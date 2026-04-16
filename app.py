@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.title("BOM Cost Tool")
+st.title("BOM Cost Consolidation Tool")
 
 file = st.file_uploader("Upload BOM file", type=["csv","xlsx"])
 
@@ -11,34 +11,47 @@ if file:
     else:
         df = pd.read_excel(file)
 
+    st.write("### Raw Data")
+    st.dataframe(df)
+
+    # Clean columns
     df.columns = df.columns.str.strip()
 
-    # Rename (edit if needed)
+    # Rename based on YOUR file
     df = df.rename(columns={
-        "Part Number": "PartNo",
-        "Description": "Description",
-        "Qty": "Quantity",
-        "Unit Cost": "UnitPrice"
+        "Part No.": "PartNo",
+        "Part description": "Description",
+        "Quantity": "Quantity",
+        "Approximate cost": "ApproxCost",
+        "Sub-assembly cost": "SubCost"
     })
 
-    if all(col in df.columns for col in ["PartNo","Description","Quantity","UnitPrice"]):
-        df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
-        df["UnitPrice"] = pd.to_numeric(df["UnitPrice"], errors="coerce").fillna(0)
+    # Convert numbers
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+    df["ApproxCost"] = pd.to_numeric(df["ApproxCost"], errors="coerce")
+    df["SubCost"] = pd.to_numeric(df["SubCost"], errors="coerce")
 
-        df["TotalCost"] = df["Quantity"] * df["UnitPrice"]
+    # ✅ Combine costs correctly
+    df["UnitPrice"] = df["ApproxCost"].fillna(df["SubCost"]).fillna(0)
 
-        summary = df.groupby(["PartNo","Description"]).agg({
-            "Quantity":"sum",
-            "UnitPrice":"max",
-            "TotalCost":"sum"
-        }).reset_index()
+    # Calculate total
+    df["TotalCost"] = df["Quantity"] * df["UnitPrice"]
 
-        st.write("### Result")
-        st.dataframe(summary)
+    # Remove empty parts
+    df = df[df["PartNo"].notna()]
 
-        summary.to_excel("result.xlsx", index=False)
+    # Consolidate
+    summary = df.groupby(["PartNo","Description"]).agg({
+        "Quantity":"sum",
+        "UnitPrice":"max",
+        "TotalCost":"sum"
+    }).reset_index()
 
-        with open("result.xlsx","rb") as f:
-            st.download_button("Download Excel", f, "result.xlsx")
-    else:
-        st.error("Column names not matching")
+    st.write("### ✅ Consolidated BOM")
+    st.dataframe(summary)
+
+    # Download
+    summary.to_excel("Consolidated_BOM.xlsx", index=False)
+
+    with open("Consolidated_BOM.xlsx","rb") as f:
+        st.download_button("Download Excel", f, "Consolidated_BOM.xlsx")
