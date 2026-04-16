@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import re
 
-st.title("BOM Explosion & Cost Consolidation Tool")
+st.title("BOM Explosion & Cost Tool (Fixed Version)")
 
 file = st.file_uploader("Upload BOM file", type=["csv", "xlsx"])
 
@@ -15,11 +16,11 @@ if file:
     else:
         df = pd.read_excel(file)
 
-    st.write("### Raw Data Preview")
+    st.write("### Raw Data")
     st.dataframe(df)
 
     # =========================
-    # CLEAN & RENAME COLUMNS
+    # CLEAN COLUMNS
     # =========================
     df.columns = df.columns.str.strip()
 
@@ -32,10 +33,20 @@ if file:
     })
 
     # =========================
-    # TYPE CONVERSION
+    # CLEAN DATA (CRITICAL FIX)
     # =========================
     df["PartNo"] = df["PartNo"].astype(str).str.strip()
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+
+    # Remove invalid rows
+    df = df[df["PartNo"].notna()]
+    df = df[df["PartNo"] != ""]
+    df = df[df["PartNo"] != "nan"]
+
+    # Keep only valid hierarchical numbers (like 1, 1.1, 1.1.1)
+    df = df[df["PartNo"].str.match(r'^\d+(\.\d+)*$')]
+
+    # Convert numbers
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(1)
     df["ApproxCost"] = pd.to_numeric(df["ApproxCost"], errors="coerce")
     df["SubCost"] = pd.to_numeric(df["SubCost"], errors="coerce")
 
@@ -44,81 +55,83 @@ if file:
     # =========================
     df["UnitPrice"] = df["ApproxCost"].fillna(df["SubCost"]).fillna(0)
 
-    # Remove empty rows
-    df = df[df["PartNo"] != ""]
-    df = df[df["PartNo"].notna()]
-
     # =========================
-    # SORT BY STRUCTURE
+    # SORT
     # =========================
     df = df.sort_values("PartNo")
 
     # =========================
-    # BUILD QUANTITY LOOKUP
+    # BUILD LOOKUP
     # =========================
     qty_dict = dict(zip(df["PartNo"], df["Quantity"]))
 
     # =========================
-    # BOM EXPLOSION (MULTIPLY LEVELS)
+    # BOM EXPLOSION (FIXED)
     # =========================
-    def get_total_qty(part):
-        parts = part.split(".")
+    def explode_qty(part):
+        levels = part.split(".")
         total = 1
-        for i in range(len(parts)):
-            parent = ".".join(parts[:i+1])
-            if parent in qty_dict:
-                total *= qty_dict[parent]
+        path = []
+
+        for i in range(len(levels)):
+            node = ".".join(levels[:i+1])
+            if node in qty_dict:
+                total *= qty_dict[node]
+
         return total
 
-    df["FinalQty"] = df["PartNo"].apply(get_total_qty)
+    df["FinalQty"] = df["PartNo"].apply(explode_qty)
 
     # =========================
-    # DETECT PARENT / CHILD
+    # STRONG PARENT DETECTION
     # =========================
-    all_parts = df["PartNo"].tolist()
+    part_set = set(df["PartNo"])
 
-    def has_children(part):
+    def is_parent(part):
         prefix = part + "."
-        return any(p.startswith(prefix) for p in all_parts)
+        for p in part_set:
+            if p.startswith(prefix):
+                return True
+        return False
 
-    df["IsParent"] = df["PartNo"].apply(has_children)
-
-    # =========================
-    # REMOVE PARENTS (KEEP LEAF ONLY)
-    # =========================
-    df = df[df["IsParent"] == False]
+    df["IsParent"] = df["PartNo"].apply(is_parent)
 
     # =========================
-    # CALCULATE COST
+    # KEEP ONLY LEAF NODES
     # =========================
-    df["TotalCost"] = df["FinalQty"] * df["UnitPrice"]
-
-    st.write("### After BOM Explosion (Leaf Parts Only)")
-    st.dataframe(df[["PartNo", "Description", "FinalQty", "UnitPrice", "TotalCost"]])
+    leaf_df = df[df["IsParent"] == False].copy()
 
     # =========================
-    # CONSOLIDATE
+    # COST CALCULATION
     # =========================
-    summary = df.groupby(["PartNo", "Description"]).agg({
-        "FinalQty": "sum",
-        "UnitPrice": "max",
-        "TotalCost": "sum"
+    leaf_df["TotalCost"] = leaf_df["FinalQty"] * leaf_df["UnitPrice"]
+
+    st.write("### Leaf Parts Only (Correct)")
+    st.dataframe(leaf_df[["PartNo","Description","FinalQty","UnitPrice","TotalCost"]])
+
+    # =========================
+    # CONSOLIDATION
+    # =========================
+    summary = leaf_df.groupby(["PartNo","Description"]).agg({
+        "FinalQty":"sum",
+        "UnitPrice":"max",
+        "TotalCost":"sum"
     }).reset_index()
 
-    summary = summary.rename(columns={"FinalQty": "Quantity"})
+    summary = summary.rename(columns={"FinalQty":"Quantity"})
 
     st.write("### ✅ Final Consolidated BOM")
     st.dataframe(summary)
 
     # =========================
-    # DOWNLOAD FILE (SAFE METHOD)
+    # DOWNLOAD
     # =========================
     output = BytesIO()
     summary.to_excel(output, index=False, engine="openpyxl")
     output.seek(0)
 
     st.download_button(
-        label="Download Consolidated Excel",
+        "Download Excel",
         data=output,
         file_name="Consolidated_BOM.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
